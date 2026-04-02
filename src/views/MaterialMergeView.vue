@@ -1,28 +1,51 @@
 <script setup>
 import { ref, computed } from 'vue'
-import { ElUpload, ElButton, ElTable, ElTableColumn, ElInput, ElMessage, ElCard, ElDialog } from 'element-plus'
+import { ElUpload, ElButton, ElTable, ElTableColumn, ElInput, ElMessage, ElCard, ElDialog, ElTabs, ElTabPane, ElPagination } from 'element-plus'
+import { eml } from 'eml'
 import {
-  readExcelFile,
+  readExcelFileWithProgress,
   parseMaterialData,
   parseMaterialUnit,
   processMerge,
   exportToExcel,
-  generateEmailAttachment,
-  getUnitGroupHeaders
+  generatePreviewTable,
+  generateAttachmentBase64
 } from '../utils/excelProcessor'
 
 // 状态
+const activeTab = ref('upload')
 const materialDataFile = ref(null)
 const materialUnitFile = ref(null)
 const materialData = ref([])
 const materialUnit = ref([])
 const mergedData = ref([])
+const rawMaterialData = ref([])  // 原始数据（未解析）
+const rawMaterialUnit = ref([])  // 原始数据（未解析）
 const maxUnits = ref(0)
 const tableHeaders = ref([])
-const isProcessing = ref(false)
 const searchQuery = ref('')
+
+// 上传进度
+const uploadProgressVisible = ref(false)
+const uploadProgress = ref({
+  fileName: '',
+  currentRow: 0,
+  totalRows: 0,
+  currentContent: '',
+  percent: 0
+})
+
+// 分页
+const currentPage = ref(1)
+const pageSize = ref(50)
+
+// 邮件对话框
 const emailDialogVisible = ref(false)
-const emailContent = ref('')
+const emailForm = ref({
+  to: '',
+  subject: 'SAP物料单位数据'
+})
+const emailPreviewData = computed(() => mergedData.value.slice(0, 20))
 
 // 过滤后的数据
 const filteredData = computed(() => {
@@ -34,7 +57,14 @@ const filteredData = computed(() => {
   )
 })
 
-// 表格列（使用 min-width 自适应）
+// 分页后的数据
+const paginatedData = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  const end = start + pageSize.value
+  return filteredData.value.slice(start, end)
+})
+
+// 表格列
 const tableColumns = computed(() => {
   const cols = [
     { prop: '物料', label: '物料', minWidth: 100 },
@@ -54,15 +84,51 @@ const tableColumns = computed(() => {
   return cols
 })
 
-// 文件上传处理
+// 源数据列（原始数据）
+const rawDataColumns = computed(() => {
+  if (!rawMaterialData.value.length) return []
+  const maxCols = Math.min(rawMaterialData.value[0].length, 15)
+  return Array.from({ length: maxCols }, (_, i) => ({
+    prop: `col${i}`,
+    label: `列${i + 1}`,
+    minWidth: 80
+  }))
+})
+
+// 文件上传处理（带进度）
 async function handleMaterialDataUpload(file) {
   materialDataFile.value = file.raw
+  uploadProgress.value = {
+    fileName: file.name,
+    currentRow: 0,
+    totalRows: 0,
+    currentContent: '',
+    percent: 0
+  }
+  uploadProgressVisible.value = true
+
   try {
-    const result = await readExcelFile(file.raw)
+    const result = await readExcelFileWithProgress(file.raw, (row, total, content) => {
+      uploadProgress.value.currentRow = row
+      uploadProgress.value.totalRows = total
+      uploadProgress.value.currentContent = content
+      uploadProgress.value.percent = Math.round((row / total) * 100)
+    })
+
+    rawMaterialData.value = result.data.map((row, idx) => {
+      const obj = { _index: idx }
+      result.headers.forEach((h, i) => {
+        obj[`col${i}`] = row[i]
+      })
+      return obj
+    })
+
     materialData.value = parseMaterialData(result)
+    uploadProgressVisible.value = false
     ElMessage.success(`material_data.xlsx 读取成功，共 ${materialData.value.length} 条数据`)
-    tryMerge()
+    checkReady()
   } catch (err) {
+    uploadProgressVisible.value = false
     ElMessage.error('读取 material_data.xlsx 失败')
     console.error(err)
   }
@@ -71,36 +137,72 @@ async function handleMaterialDataUpload(file) {
 
 async function handleMaterialUnitUpload(file) {
   materialUnitFile.value = file.raw
+  uploadProgress.value = {
+    fileName: file.name,
+    currentRow: 0,
+    totalRows: 0,
+    currentContent: '',
+    percent: 0
+  }
+  uploadProgressVisible.value = true
+
   try {
-    const result = await readExcelFile(file.raw)
+    const result = await readExcelFileWithProgress(file.raw, (row, total, content) => {
+      uploadProgress.value.currentRow = row
+      uploadProgress.value.totalRows = total
+      uploadProgress.value.currentContent = content
+      uploadProgress.value.percent = Math.round((row / total) * 100)
+    })
+
+    rawMaterialUnit.value = result.data.map((row, idx) => {
+      const obj = { _index: idx }
+      result.headers.forEach((h, i) => {
+        obj[`col${i}`] = row[i]
+      })
+      return obj
+    })
+
     materialUnit.value = parseMaterialUnit(result)
+    uploadProgressVisible.value = false
     ElMessage.success(`material_unit.xlsx 读取成功，共 ${materialUnit.value.length} 条数据`)
-    tryMerge()
+    checkReady()
   } catch (err) {
+    uploadProgressVisible.value = false
     ElMessage.error('读取 material_unit.xlsx 失败')
     console.error(err)
   }
   return false
 }
 
-// 合并数据
-function tryMerge() {
-  if (materialData.value.length === 0 || materialUnit.value.length === 0) {
+// 检查是否准备好计算
+const canCalculate = computed(() => {
+  return materialData.value.length > 0 && materialUnit.value.length > 0
+})
+
+function checkReady() {
+  if (canCalculate.value) {
+    ElMessage.info('两个文件已上传完成，点击"开始计算"进行数据合并')
+  }
+}
+
+// 开始计算
+function startCalculate() {
+  if (!canCalculate.value) {
+    ElMessage.warning('请先上传两个文件')
     return
   }
 
-  isProcessing.value = true
   try {
     const result = processMerge(materialData.value, materialUnit.value)
     mergedData.value = result.mergedData
     maxUnits.value = result.maxUnits
     tableHeaders.value = result.headers
+    currentPage.value = 1
+    activeTab.value = 'merged'
     ElMessage.success(`合并完成！共 ${mergedData.value.length} 条数据，最大 ${maxUnits.value} 个单位转换`)
   } catch (err) {
     ElMessage.error('合并失败')
     console.error(err)
-  } finally {
-    isProcessing.value = false
   }
 }
 
@@ -119,188 +221,318 @@ function handleExportExcel() {
   }
 }
 
-// 生成邮件
-function handleGenerateEmail() {
+// 导出 EML 邮件
+function handleExportEmail() {
   if (mergedData.value.length === 0) {
-    ElMessage.warning('没有数据可生成邮件')
+    ElMessage.warning('没有数据可导出')
     return
   }
+  emailDialogVisible.value = true
+}
+
+function confirmExportEmail() {
+  if (!emailForm.value.to) {
+    ElMessage.warning('请输入收件人邮箱')
+    return
+  }
+
   try {
-    const base64 = generateEmailAttachment(mergedData.value, maxUnits.value)
-    emailContent.value = base64
-    emailDialogVisible.value = true
+    const previewHtml = generatePreviewTable(emailDataForPreview.value, maxUnits.value)
+    const attachmentBase64 = generateAttachmentBase64(mergedData.value, maxUnits.value)
+
+    const emlObject = {
+      from: 'sap-system@company.com',
+      to: emailForm.value.to,
+      subject: emailForm.value.subject || 'SAP物料单位数据',
+      body: {
+        text: `SAP物料单位数据汇总\n共 ${mergedData.value.length} 条记录\n\n预览（前20条）:\n${emailPreviewText.value}`,
+        html: `<html><body><h3>SAP物料单位数据汇总</h3><p>共 ${mergedData.value.length} 条记录</p>${previewHtml}</body></html>`
+      },
+      attachments: [
+        {
+          filename: 'material_data.xlsx',
+          contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          content: attachmentBase64
+        }
+      ]
+    }
+
+    const emlString = eml.generateEml(emlObject)
+
+    // 下载 EML 文件
+    const blob = new Blob([emlString], { type: 'message/rfc822' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'SAP物料数据.eml'
+    a.click()
+    URL.revokeObjectURL(url)
+
+    emailDialogVisible.value = false
+    ElMessage.success('邮件文件已生成并下载')
   } catch (err) {
-    ElMessage.error('生成邮件失败')
     console.error(err)
+    ElMessage.error('生成邮件失败')
   }
 }
 
-// 下载附件
-function downloadAttachment() {
-  const binary = atob(emailContent.value)
-  const array = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) {
-    array[i] = binary.charCodeAt(i)
-  }
-  const blob = new Blob([array], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = 'material_data.xlsx'
-  a.click()
-  URL.revokeObjectURL(url)
-  ElMessage.success('附件已生成，点击复制 Base64 内容')
-}
+const emailDataForPreview = computed(() => mergedData.value.slice(0, 20))
 
-// 复制 Base64
-function copyBase64() {
-  navigator.clipboard.writeText(emailContent.value)
-  ElMessage.success('Base64 内容已复制到剪贴板')
-}
+const emailPreviewText = computed(() => {
+  const rows = emailDataForPreview.value.map(row =>
+    `${row.物料} | ${row.物料描述} | ${row.基本计量单位}`
+  )
+  return rows.join('\n')
+})
 
 // 删除行
 function deleteRow(index) {
-  mergedData.value.splice(index, 1)
+  const realIndex = (currentPage.value - 1) * pageSize.value + index
+  mergedData.value.splice(realIndex, 1)
   ElMessage.success('已删除')
 }
 
 // 添加行
 function addRow() {
-  mergedData.value.push({
-    物料: '',
-    物料描述: '',
-    基本计量单位: ''
-  })
+  const newRow = { 物料: '', 物料描述: '', 基本计量单位: '' }
+  for (let i = 1; i <= maxUnits.value; i++) {
+    newRow[`分母${i}`] = ''
+    newRow[`基本计量单位${i}`] = ''
+    newRow[`可选单位${i}`] = ''
+    newRow[`等于${i}`] = ''
+    newRow[`计数器${i}`] = ''
+  }
+  mergedData.value.push(newRow)
 }
 
-// 行样式
-function getRowClass({ rowIndex }) {
-  if (rowIndex === 0) return 'header-row'
-  return ''
+// 页码改变
+function handlePageChange(page) {
+  currentPage.value = page
 }
 </script>
 
 <template>
   <div class="container">
-    <el-card class="upload-card">
-      <template #header>
-        <div class="card-header">
-          <span>上传 Excel 文件</span>
-        </div>
-      </template>
+    <el-tabs v-model="activeTab" class="main-tabs">
+      <!-- 上传页 -->
+      <el-tab-pane label="上传文件" name="upload">
+        <el-card class="upload-card">
+          <template #header>
+            <div class="card-header">
+              <span>上传 Excel 文件</span>
+            </div>
+          </template>
 
-      <div class="upload-section">
-        <div class="upload-item">
-          <h4>material_data.xlsx</h4>
-          <p class="upload-hint">取第1列、倒数第1列、第13列</p>
-          <el-upload
-            :auto-upload="false"
-            :show-file-list="true"
-            :on-change="handleMaterialDataUpload"
-            accept=".xlsx,.xls"
-          >
-            <el-button type="primary">选择文件</el-button>
-          </el-upload>
-        </div>
+          <div class="upload-section">
+            <div class="upload-item">
+              <h4>material_data.xlsx <span class="source-tag">来源: SAP SE16N MARA表</span></h4>
+              <p class="upload-hint">取第1列、倒数第1列、第13列</p>
+              <el-upload
+                :auto-upload="false"
+                :show-file-list="true"
+                :on-change="handleMaterialDataUpload"
+                accept=".xlsx,.xls"
+              >
+                <el-button type="primary">选择文件</el-button>
+              </el-upload>
+            </div>
 
-        <div class="upload-item">
-          <h4>material_unit.xlsx</h4>
-          <p class="upload-hint">取第1-4列（物料、可选计量单位、计数器、分母）</p>
-          <el-upload
-            :auto-upload="false"
-            :show-file-list="true"
-            :on-change="handleMaterialUnitUpload"
-            accept=".xlsx,.xls"
-          >
-            <el-button type="primary">选择文件</el-button>
-          </el-upload>
-        </div>
-      </div>
-    </el-card>
-
-    <el-card v-if="mergedData.length > 0" class="table-card">
-      <template #header>
-        <div class="card-header">
-          <span class="title">数据预览与编辑</span>
-          <div class="header-actions">
-            <el-input
-              v-model="searchQuery"
-              placeholder="搜索..."
-              class="search-input"
-              clearable
-            />
-            <el-button type="success" size="small" @click="addRow">添加</el-button>
-            <el-button type="primary" size="small" @click="handleExportExcel">导出</el-button>
-            <el-button type="warning" size="small" @click="handleGenerateEmail">邮件</el-button>
+            <div class="upload-item">
+              <h4>material_unit.xlsx <span class="source-tag">来源: SAP SE16N MARM表</span></h4>
+              <p class="upload-hint">取第1-4列（物料、可选计量单位、计数器、分母）</p>
+              <el-upload
+                :auto-upload="false"
+                :show-file-list="true"
+                :on-change="handleMaterialUnitUpload"
+                accept=".xlsx,.xls"
+              >
+                <el-button type="primary">选择文件</el-button>
+              </el-upload>
+            </div>
           </div>
+
+          <div class="upload-status">
+            <el-tag v-if="materialData.length > 0" type="success" size="large">material_data: {{ materialData.length }} 条</el-tag>
+            <el-tag v-if="materialUnit.length > 0" type="success" size="large">material_unit: {{ materialUnit.length }} 条</el-tag>
+            <el-tag v-if="canCalculate" type="warning" size="large">待计算</el-tag>
+          </div>
+
+          <div class="calculate-btn-wrapper">
+            <el-button type="warning" size="large" :disabled="!canCalculate" @click="startCalculate">
+              开始计算
+            </el-button>
+          </div>
+        </el-card>
+
+        <!-- 源数据预览 -->
+        <el-card v-if="rawMaterialData.length > 0 || rawMaterialUnit.length > 0" class="source-card">
+          <template #header>
+            <span>源数据预览</span>
+          </template>
+          <el-tabs>
+            <el-tab-pane v-if="rawMaterialData.length > 0" label="material_data (原始)">
+              <el-table :data="rawMaterialData.slice(0, 100)" border height="300" style="width: 100%">
+                <el-table-column type="index" width="60" label="行号" />
+                <el-table-column
+                  v-for="col in rawDataColumns"
+                  :key="col.prop"
+                  :prop="col.prop"
+                  :label="col.label"
+                  :min-width="col.minWidth"
+                />
+              </el-table>
+              <div class="source-footer">共 {{ rawMaterialData.length }} 行</div>
+            </el-tab-pane>
+            <el-tab-pane v-if="rawMaterialUnit.length > 0" label="material_unit (原始)">
+              <el-table :data="rawMaterialUnit.slice(0, 100)" border height="300" style="width: 100%">
+                <el-table-column type="index" width="60" label="行号" />
+                <el-table-column
+                  v-for="col in rawDataColumns"
+                  :key="col.prop"
+                  :prop="col.prop"
+                  :label="col.label"
+                  :min-width="col.minWidth"
+                />
+              </el-table>
+              <div class="source-footer">共 {{ rawMaterialUnit.length }} 行</div>
+            </el-tab-pane>
+          </el-tabs>
+        </el-card>
+      </el-tab-pane>
+
+      <!-- 合并数据页 -->
+      <el-tab-pane label="合并数据" name="merged" :disabled="mergedData.length === 0">
+        <el-card class="table-card">
+          <template #header>
+            <div class="card-header">
+              <span class="title">数据预览与编辑</span>
+              <div class="header-actions">
+                <el-input
+                  v-model="searchQuery"
+                  placeholder="搜索..."
+                  class="search-input"
+                  clearable
+                />
+                <el-button type="success" size="small" @click="addRow">添加</el-button>
+                <el-button type="primary" size="small" @click="handleExportExcel">导出Excel</el-button>
+                <el-button type="warning" size="small" @click="handleExportEmail">导出邮件</el-button>
+              </div>
+            </div>
+          </template>
+
+          <div class="table-wrapper">
+            <el-table
+              :data="paginatedData"
+              border
+              stripe
+              height="450"
+              style="width: 100%"
+            >
+              <el-table-column type="index" width="60" label="序号" />
+
+              <el-table-column
+                v-for="col in tableColumns"
+                :key="col.prop"
+                :prop="col.prop"
+                :label="col.label"
+                :min-width="col.minWidth"
+              >
+                <template #default="{ row, $index }">
+                  <el-input
+                    v-model="row[col.prop]"
+                    size="small"
+                    @change="paginatedData[$index][col.prop] = row[col.prop]"
+                  />
+                </template>
+              </el-table-column>
+
+              <el-table-column label="操作" width="80" fixed="right">
+                <template #default="{ $index }">
+                  <el-button type="danger" size="small" @click="deleteRow($index)">删除</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+
+          <div class="table-footer">
+            <el-pagination
+              v-model:current-page="currentPage"
+              :page-size="pageSize"
+              :total="filteredData.length"
+              layout="total, prev, pager, next"
+              @current-change="handlePageChange"
+            />
+            <span class="data-count">共 {{ filteredData.length }} 条数据</span>
+          </div>
+        </el-card>
+      </el-tab-pane>
+    </el-tabs>
+
+    <!-- 上传进度对话框 -->
+    <el-dialog
+      v-model="uploadProgressVisible"
+      title="正在处理文件"
+      width="90%"
+      max-width="500px"
+      :close-on-click-modal="false"
+      :show-close="false"
+    >
+      <div class="progress-content">
+        <p class="progress-filename">{{ uploadProgress.fileName }}</p>
+        <el-progress :percentage="uploadProgress.percent" :stroke-width="15" />
+        <div class="progress-info">
+          <span>正在处理第 {{ uploadProgress.currentRow }} / {{ uploadProgress.totalRows }} 行</span>
+          <span>{{ uploadProgress.percent }}%</span>
         </div>
-      </template>
-
-      <div class="table-wrapper">
-        <el-table
-          :data="filteredData"
-          border
-          stripe
-          height="500"
-          :row-class-name="getRowClass"
-          style="width: 100%"
-        >
-          <el-table-column type="index" width="60" label="序号" />
-
-          <el-table-column
-            v-for="col in tableColumns"
-            :key="col.prop"
-            :prop="col.prop"
-            :label="col.label"
-            :min-width="col.minWidth"
-          >
-            <template #default="{ row, $index }">
-              <el-input
-                v-model="row[col.prop]"
-                size="small"
-                @change="mergedData[$index][col.prop] = row[col.prop]"
-              />
-            </template>
-          </el-table-column>
-
-          <el-table-column label="操作" width="80" fixed="right">
-            <template #default="{ $index }">
-              <el-button type="danger" size="small" @click="deleteRow($index)">删除</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
+        <div class="progress-preview" v-if="uploadProgress.currentContent">
+          {{ uploadProgress.currentContent }}
+        </div>
+        <div class="progress-remaining">
+          剩余约 {{ Math.max(0, uploadProgress.totalRows - uploadProgress.currentRow) }} 条
+        </div>
       </div>
+    </el-dialog>
 
-      <div class="table-footer">
-        <span>共 {{ filteredData.length }} 条数据</span>
-      </div>
-    </el-card>
-
-    <el-card v-else class="empty-card">
-      <div class="empty-state">
-        <p>请上传两个 Excel 文件开始处理</p>
-      </div>
-    </el-card>
-
-    <!-- 邮件对话框 -->
+    <!-- 邮件导出对话框 -->
     <el-dialog
       v-model="emailDialogVisible"
-      title="邮件附件"
+      title="导出邮件"
       width="90%"
-      max-width="600px"
+      max-width="500px"
     >
-      <div class="email-dialog-content">
-        <p>附件 Base64 内容已生成，可以下载或复制使用：</p>
-        <el-input
-          v-model="emailContent"
-          type="textarea"
-          :rows="6"
-          style="margin-top: 10px"
-        />
+      <el-form :model="emailForm" label-width="80px">
+        <el-form-item label="收件人">
+          <el-input v-model="emailForm.to" placeholder="请输入收件人邮箱" />
+        </el-form-item>
+        <el-form-item label="主题">
+          <el-input v-model="emailForm.subject" placeholder="邮件主题" />
+        </el-form-item>
+      </el-form>
+      <div class="email-preview">
+        <h4>邮件预览（前20条）</h4>
+        <div class="preview-table-wrapper">
+          <table class="preview-table">
+            <thead>
+              <tr>
+                <th>物料</th>
+                <th>物料描述</th>
+                <th>基本计量单位</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, idx) in emailPreviewData" :key="idx">
+                <td>{{ row.物料 }}</td>
+                <td>{{ row.物料描述 }}</td>
+                <td>{{ row.基本计量单位 }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="preview-footer">附件将包含全部 {{ mergedData.length }} 条数据</p>
       </div>
       <template #footer>
-        <el-button @click="copyBase64">复制 Base64</el-button>
-        <el-button type="primary" @click="downloadAttachment">下载附件</el-button>
+        <el-button @click="emailDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="confirmExportEmail">确认导出</el-button>
       </template>
     </el-dialog>
   </div>
@@ -313,8 +545,14 @@ function getRowClass({ rowIndex }) {
   background: #f5f5f5;
 }
 
+.main-tabs {
+  background: white;
+  padding: 16px;
+  border-radius: 4px;
+}
+
 .upload-card {
-  margin-bottom: 12px;
+  margin-bottom: 16px;
 }
 
 .card-header {
@@ -351,12 +589,46 @@ function getRowClass({ rowIndex }) {
   margin-bottom: 5px;
   color: #409eff;
   font-size: 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.source-tag {
+  font-size: 11px;
+  color: #909399;
+  font-weight: normal;
+  background: #f0f0f0;
+  padding: 2px 6px;
+  border-radius: 3px;
 }
 
 .upload-hint {
   font-size: 12px;
   color: #909399;
   margin-bottom: 10px;
+}
+
+.upload-status {
+  margin-top: 16px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.calculate-btn-wrapper {
+  margin-top: 20px;
+  text-align: center;
+}
+
+.source-card {
+  margin-top: 16px;
+}
+
+.source-footer {
+  margin-top: 10px;
+  color: #606266;
+  font-size: 13px;
 }
 
 .table-card {
@@ -369,25 +641,96 @@ function getRowClass({ rowIndex }) {
 
 .table-footer {
   margin-top: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.data-count {
   color: #606266;
   font-size: 13px;
 }
 
-.empty-card {
-  text-align: center;
-}
-
-.empty-state {
-  padding: 60px 0;
-  color: #909399;
-}
-
-.email-dialog-content {
+/* 进度对话框 */
+.progress-content {
   padding: 10px 0;
-  word-break: break-all;
 }
 
-.email-dialog-content .el-textarea {
+.progress-filename {
+  font-weight: bold;
+  margin-bottom: 15px;
+  color: #409eff;
+}
+
+.progress-info {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+  color: #606266;
+  font-size: 13px;
+}
+
+.progress-preview {
+  margin-top: 10px;
+  padding: 8px;
+  background: #f5f5f5;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #909399;
+  max-height: 60px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-remaining {
+  margin-top: 10px;
+  color: #909399;
+  font-size: 12px;
+}
+
+/* 邮件预览 */
+.email-preview {
+  margin-top: 15px;
+  border-top: 1px solid #eee;
+  padding-top: 15px;
+}
+
+.email-preview h4 {
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+
+.preview-table-wrapper {
+  max-height: 200px;
+  overflow: auto;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+}
+
+.preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.preview-table th,
+.preview-table td {
+  padding: 6px 8px;
+  text-align: left;
+  border-bottom: 1px solid #eee;
+}
+
+.preview-table th {
+  background: #f5f5f5;
+  font-weight: bold;
+  position: sticky;
+  top: 0;
+}
+
+.preview-footer {
+  margin-top: 10px;
+  color: #909399;
   font-size: 12px;
 }
 

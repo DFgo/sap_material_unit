@@ -1,9 +1,72 @@
 import * as XLSX from 'xlsx'
 
 /**
- * 读取 Excel 文件
+ * 读取 Excel 文件（带进度回调）
  * @param {File} file - Excel 文件
+ * @param {Function} onProgress - 进度回调 (currentRow, totalRows, rowContent)
  * @returns {Promise<{headers: string[], data: any[][], sheetName: string}>}
+ */
+export async function readExcelFileWithProgress(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target.result)
+        const workbook = XLSX.read(data, { type: 'array', cellDates: true })
+        const sheetName = workbook.SheetNames[0]
+        const sheet = workbook.Sheets[sheetName]
+
+        // 转换为数组格式（保留所有单元格，包括空单元格）
+        const jsonData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
+
+        const headers = jsonData[0] || []
+        const rows = jsonData.slice(1)
+
+        // 过滤掉空行
+        const nonEmptyRows = rows.filter(row => row.some(cell => cell !== ''))
+        const totalRows = nonEmptyRows.length
+
+        // 进度回调（分批处理，避免阻塞）
+        let processed = 0
+        const batchSize = 50
+        const filteredRows = []
+
+        function processBatch() {
+          return new Promise((resolve) => {
+            const end = Math.min(processed + batchSize, totalRows)
+            for (let i = processed; i < end; i++) {
+              filteredRows.push(nonEmptyRows[i])
+              const preview = nonEmptyRows[i].slice(0, 5).join(' | ')
+              onProgress(i + 1, totalRows, preview)
+            }
+            processed = end
+            resolve()
+          })
+        }
+
+        async function processAll() {
+          while (processed < totalRows) {
+            await processBatch()
+            // 让UI有机会更新
+            await new Promise(r => setTimeout(r, 0))
+          }
+
+          onProgress(totalRows, totalRows, '处理完成')
+          resolve({ headers, data: filteredRows, sheetName })
+        }
+
+        processAll().catch(reject)
+      } catch (err) {
+        reject(err)
+      }
+    }
+    reader.onerror = reject
+    reader.readAsArrayBuffer(file)
+  })
+}
+
+/**
+ * 读取 Excel 文件（无进度，纯读取）
  */
 export async function readExcelFile(file) {
   return new Promise((resolve, reject) => {
@@ -15,7 +78,6 @@ export async function readExcelFile(file) {
         const sheetName = workbook.SheetNames[0]
         const sheet = workbook.Sheets[sheetName]
 
-        // 转换为数组格式（保留所有单元格，包括空单元格）
         const jsonData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
 
         const headers = jsonData[0] || []
@@ -37,7 +99,6 @@ export async function readExcelFile(file) {
  */
 export function parseMaterialData(rawData) {
   const rows = rawData.data
-  // 取第0列、倒数第1列（-1即length-1）、第12列
   return rows.map(row => ({
     物料: row[0] || '',
     物料描述: row[row.length - 1] || '',
@@ -61,10 +122,8 @@ export function parseMaterialUnit(rawData) {
 
 /**
  * 合并数据，添加单位转换列
- * 返回 { mergedData: [], maxUnits: number, headers: [] }
  */
 export function processMerge(materialData, materialUnit) {
-  // 获取最大单位转换数量
   const unitCounts = {}
   materialUnit.forEach(row => {
     if (!unitCounts[row.物料]) {
@@ -74,9 +133,7 @@ export function processMerge(materialData, materialUnit) {
   })
 
   const maxUnits = Math.max(...Object.values(unitCounts).map(v => v.length), 0)
-  console.log(`检测到单个物料最多有 ${maxUnits} 个单位转换`)
 
-  // 构建表头
   const headers = [
     { label: '物料', prop: '物料', span: 1 },
     { label: '物料描述', prop: '物料描述', span: 1 },
@@ -93,7 +150,6 @@ export function processMerge(materialData, materialUnit) {
     )
   }
 
-  // 构建合并后的数据
   const mergedData = materialData.map(row => {
     const newRow = {
       物料: row.物料,
@@ -111,7 +167,6 @@ export function processMerge(materialData, materialUnit) {
       newRow[`计数器${i}`] = u.计数器
     })
 
-    // 填充空列
     for (let i = units.length + 1; i <= maxUnits; i++) {
       newRow[`分母${i}`] = ''
       newRow[`基本计量单位${i}`] = ''
@@ -130,40 +185,28 @@ export function processMerge(materialData, materialUnit) {
  * 导出为 Excel 文件（带合并标题行）
  */
 export function exportToExcel(mergedData, maxUnits, filename = 'merged_output.xlsx') {
-  // 构建工作表数据
-  // 第1行: 大标题（物料、物料描述、基本计量单位 + 单位转换1-5合并标题）
-  // 第2行: 小标题
-
   const props = ['物料', '物料描述', '基本计量单位']
   for (let i = 1; i <= maxUnits; i++) {
     props.push(`分母${i}`, `基本计量单位${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`)
   }
 
-  // 构建表头行
   const headerRow1 = ['物料', '物料描述', '基本计量单位']
   const headerRow2 = ['物料', '物料描述', '基本计量单位']
-  let col = 4
 
   for (let i = 1; i <= maxUnits; i++) {
-    headerRow1.push(`单位转换${i}`, '', '', '', '') // 合并5列
+    headerRow1.push(`单位转换${i}`, '', '', '', '')
     headerRow2.push(`分母${i}`, `基本计量单位${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`)
-    col += 5
   }
 
-  // 构建数据行
   const dataRows = mergedData.map(row =>
     props.map(prop => row[prop] || '')
   )
 
-  // 合并所有数据
   const allData = [headerRow1, headerRow2, ...dataRows]
-
-  // 创建工作表
   const ws = XLSX.utils.aoa_to_sheet(allData)
 
-  // 设置合并单元格
   const merges = []
-  let mergeCol = 3 // 从第4列开始（索引3）
+  let mergeCol = 3
 
   for (let i = 1; i <= maxUnits; i++) {
     merges.push({
@@ -174,23 +217,47 @@ export function exportToExcel(mergedData, maxUnits, filename = 'merged_output.xl
   }
 
   ws['!merges'] = merges
+  ws['!cols'] = props.map((_, idx) => idx < 3 ? { wch: 15 } : { wch: 12 })
 
-  // 设置列宽
-  ws['!cols'] = props.map((_, idx) => {
-    if (idx < 3) return { wch: 15 }
-    return { wch: 12 }
-  })
-
-  // 创建工作簿
   const wb = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(wb, ws, 'material_data')
-
-  // 写入文件
   XLSX.writeFile(wb, filename)
 }
 
 /**
- * 生成邮件附件内容（Base64）
+ * 生成预览表格 HTML
+ */
+export function generatePreviewTable(data, maxUnits) {
+  if (!data || data.length === 0) return ''
+
+  const props = ['物料', '物料描述', '基本计量单位']
+  for (let i = 1; i <= maxUnits; i++) {
+    props.push(`分母${i}`, `基本计量单位${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`)
+  }
+
+  const headers = ['物料', '物料描述', '基本计量单位']
+
+  let html = '<table style="border-collapse:collapse;width:100%;font-size:12px;">'
+  html += '<tr>'
+  headers.forEach(h => {
+    html += `<th style="border:1px solid #ddd;padding:6px;background:#f5f5f5;">${h}</th>`
+  })
+  html += '</tr>'
+
+  data.slice(0, 20).forEach(row => {
+    html += '<tr>'
+    headers.forEach(prop => {
+      html += `<td style="border:1px solid #ddd;padding:6px;">${row[prop] || ''}</td>`
+    })
+    html += '</tr>'
+  })
+
+  html += '</table>'
+  return html
+}
+
+/**
+ * 生成邮件附件内容（Base64）- 保留以兼容旧代码
  */
 export function generateEmailAttachment(mergedData, maxUnits) {
   const props = ['物料', '物料描述', '基本计量单位']
@@ -209,19 +276,12 @@ export function generateEmailAttachment(mergedData, maxUnits) {
 
   const allData = [headerRow, ...dataRows]
   const ws = XLSX.utils.aoa_to_sheet(allData)
-
-  // 合并单元格（只有数据区域的合并，没有大标题）
-  ws['!cols'] = props.map((_, idx) => {
-    if (idx < 3) return { wch: 15 }
-    return { wch: 12 }
-  })
+  ws['!cols'] = props.map(() => ({ wch: 12 }))
 
   const wb = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(wb, ws, 'material_data')
 
-  // 生成 base64
-  const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'base64' })
-  return wbout
+  return XLSX.write(wb, { bookType: 'xlsx', type: 'base64' })
 }
 
 /**
@@ -236,4 +296,29 @@ export function getUnitGroupHeaders(maxUnits) {
     })
   }
   return groups
+}
+
+/**
+ * 生成邮件附件 Base64 (不含表头，仅数据)
+ */
+export function generateAttachmentBase64(data, maxUnits) {
+  const props = ['物料', '物料描述', '基本计量单位']
+  for (let i = 1; i <= maxUnits; i++) {
+    props.push(`分母${i}`, `基本计量单位${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`)
+  }
+
+  const headerRow = ['物料', '物料描述', '基本计量单位']
+  for (let i = 1; i <= maxUnits; i++) {
+    headerRow.push(`分母${i}`, `基本计量单位${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`)
+  }
+
+  const dataRows = data.map(row => props.map(prop => row[prop] || ''))
+  const allData = [headerRow, ...dataRows]
+  const ws = XLSX.utils.aoa_to_sheet(allData)
+  ws['!cols'] = props.map(() => ({ wch: 12 }))
+
+  const wb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb, ws, 'material_data')
+
+  return XLSX.write(wb, { bookType: 'xlsx', type: 'base64' })
 }
