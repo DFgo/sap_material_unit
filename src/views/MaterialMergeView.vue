@@ -1,7 +1,6 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { ElUpload, ElButton, ElTable, ElTableColumn, ElInput, ElMessage, ElCard, ElDialog, ElTabs, ElTabPane, ElPagination } from 'element-plus'
-import { eml } from 'eml'
 import {
   readExcelFileWithProgress,
   parseMaterialData,
@@ -24,6 +23,10 @@ const rawMaterialUnit = ref([])  // 原始数据（未解析）
 const maxUnits = ref(0)
 const tableHeaders = ref([])
 const searchQuery = ref('')
+
+// 原始数据分页
+const rawDataPage = ref(1)
+const rawDataPageSize = ref(100)
 
 // 上传进度
 const uploadProgressVisible = ref(false)
@@ -84,16 +87,43 @@ const tableColumns = computed(() => {
   return cols
 })
 
-// 源数据列（原始数据）
-const rawDataColumns = computed(() => {
+// 源数据列（原始数据 - 根据第一行数据动态计算）
+const rawMaterialDataColumns = computed(() => {
   if (!rawMaterialData.value.length) return []
-  const maxCols = Math.min(rawMaterialData.value[0].length, 15)
-  return Array.from({ length: maxCols }, (_, i) => ({
+  const firstRow = rawMaterialData.value[0]
+  const maxCols = Object.keys(firstRow).filter(k => k.startsWith('col')).length
+  const displayCols = Math.min(maxCols, 15)
+  return Array.from({ length: displayCols }, (_, i) => ({
     prop: `col${i}`,
     label: `列${i + 1}`,
     minWidth: 80
   }))
 })
+
+const rawMaterialUnitColumns = computed(() => {
+  if (!rawMaterialUnit.value.length) return []
+  const firstRow = rawMaterialUnit.value[0]
+  const maxCols = Object.keys(firstRow).filter(k => k.startsWith('col')).length
+  const displayCols = Math.min(maxCols, 15)
+  return Array.from({ length: displayCols }, (_, i) => ({
+    prop: `col${i}`,
+    label: `列${i + 1}`,
+    minWidth: 80
+  }))
+})
+
+// 源数据分页后的数据
+const paginatedRawMaterialData = computed(() => {
+  const start = (rawDataPage.value - 1) * rawDataPageSize.value
+  const end = start + rawDataPageSize.value
+  return rawMaterialData.value.slice(start, end)
+})
+
+const rawMaterialDataTotal = computed(() => rawMaterialData.value.length)
+
+function handleRawDataPageChange(page) {
+  rawDataPage.value = page
+}
 
 // 文件上传处理（带进度）
 async function handleMaterialDataUpload(file) {
@@ -240,27 +270,37 @@ function confirmExportEmail() {
     const previewHtml = generatePreviewTable(emailDataForPreview.value, maxUnits.value)
     const attachmentBase64 = generateAttachmentBase64(mergedData.value, maxUnits.value)
 
-    const emlObject = {
-      from: 'sap-system@company.com',
-      to: emailForm.value.to,
-      subject: emailForm.value.subject || 'SAP物料单位数据',
-      body: {
-        text: `SAP物料单位数据汇总\n共 ${mergedData.value.length} 条记录\n\n预览（前20条）:\n${emailPreviewText.value}`,
-        html: `<html><body><h3>SAP物料单位数据汇总</h3><p>共 ${mergedData.value.length} 条记录</p>${previewHtml}</body></html>`
-      },
-      attachments: [
-        {
-          filename: 'material_data.xlsx',
-          contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          content: attachmentBase64
-        }
-      ]
-    }
+    // 手动构造 EML 文件（RFC 822 格式）
+    const from = 'sap-system@company.com'
+    const to = emailForm.value.to
+    const subject = emailForm.value.subject || 'SAP物料单位数据'
+    const date = new Date().toUTCString()
 
-    const emlString = eml.generateEml(emlObject)
+    // 构造邮件内容
+    const boundary = '----=_Part_12345'
+
+    let emlContent = `From: ${from}\n`
+    emlContent += `To: ${to}\n`
+    emlContent += `Subject: ${subject}\n`
+    emlContent += `Date: ${date}\n`
+    emlContent += `MIME-Version: 1.0\n`
+    emlContent += `Content-Type: multipart/mixed; boundary="${boundary}"\n\n`
+
+    // 正文部分
+    emlContent += `--${boundary}\n`
+    emlContent += `Content-Type: text/html; charset=utf-8\n\n`
+    emlContent += `<html><body><h3>SAP物料单位数据汇总</h3><p>共 ${mergedData.value.length} 条记录</p>${previewHtml}</body></html>\n\n`
+
+    // 附件部分
+    emlContent += `--${boundary}\n`
+    emlContent += `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet; name="material_data.xlsx"\n`
+    emlContent += `Content-Transfer-Encoding: base64\n`
+    emlContent += `Content-Disposition: attachment; filename="material_data.xlsx"\n\n`
+    emlContent += attachmentBase64 + '\n\n'
+    emlContent += `--${boundary}--\n`
 
     // 下载 EML 文件
-    const blob = new Blob([emlString], { type: 'message/rfc822' })
+    const blob = new Blob([emlContent], { type: 'message/rfc822' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -277,13 +317,6 @@ function confirmExportEmail() {
 }
 
 const emailDataForPreview = computed(() => mergedData.value.slice(0, 20))
-
-const emailPreviewText = computed(() => {
-  const rows = emailDataForPreview.value.map(row =>
-    `${row.物料} | ${row.物料描述} | ${row.基本计量单位}`
-  )
-  return rows.join('\n')
-})
 
 // 删除行
 function deleteRow(index) {
@@ -371,23 +404,36 @@ function handlePageChange(page) {
           </template>
           <el-tabs>
             <el-tab-pane v-if="rawMaterialData.length > 0" label="material_data (原始)">
-              <el-table :data="rawMaterialData.slice(0, 100)" border height="300" style="width: 100%">
-                <el-table-column type="index" width="60" label="行号" />
+              <el-table :data="paginatedRawMaterialData" border height="300" style="width: 100%">
+                <el-table-column type="index" width="70" label="行号">
+                  <template #default="{ $index }">
+                    {{ (rawDataPage - 1) * rawDataPageSize + $index + 1 }}
+                  </template>
+                </el-table-column>
                 <el-table-column
-                  v-for="col in rawDataColumns"
+                  v-for="col in rawMaterialDataColumns"
                   :key="col.prop"
                   :prop="col.prop"
                   :label="col.label"
                   :min-width="col.minWidth"
                 />
               </el-table>
-              <div class="source-footer">共 {{ rawMaterialData.length }} 行</div>
+              <div class="source-footer">
+                <el-pagination
+                  v-model:current-page="rawDataPage"
+                  :page-size="rawDataPageSize"
+                  :total="rawMaterialDataTotal"
+                  layout="total, prev, pager, next"
+                  @current-change="handleRawDataPageChange"
+                />
+                <span class="total-count">共 {{ rawMaterialDataTotal }} 行</span>
+              </div>
             </el-tab-pane>
             <el-tab-pane v-if="rawMaterialUnit.length > 0" label="material_unit (原始)">
               <el-table :data="rawMaterialUnit.slice(0, 100)" border height="300" style="width: 100%">
-                <el-table-column type="index" width="60" label="行号" />
+                <el-table-column type="index" width="70" label="行号" />
                 <el-table-column
-                  v-for="col in rawDataColumns"
+                  v-for="col in rawMaterialUnitColumns"
                   :key="col.prop"
                   :prop="col.prop"
                   :label="col.label"
@@ -627,6 +673,12 @@ function handlePageChange(page) {
 
 .source-footer {
   margin-top: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.source-footer .total-count {
   color: #606266;
   font-size: 13px;
 }
