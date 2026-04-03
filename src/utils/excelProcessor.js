@@ -22,9 +22,9 @@ export function getTableColumns(maxUnits) {
     columns.push(
       { prop: `分母${i}`, label: `分母${i}` },
       { prop: `基本计量单位${i}`, label: `基本计量单位${i}` },
-      { prop: `可选单位${i}`, label: `可选单位${i}` },
       { prop: `等于${i}`, label: `=` },
-      { prop: `计数器${i}`, label: `计数器${i}` }
+      { prop: `计数器${i}`, label: `计数器${i}` },
+      { prop: `可选单位${i}`, label: `可选单位${i}` },
     )
   }
   return columns
@@ -387,6 +387,11 @@ export function generateEmlContent(mergedData, maxUnits, emailOptions) {
   // 生成附件 Excel Buffer（双层表头）
   const excelBuffer = generateAttachmentExcelBuffer(mergedData, maxUnits)
 
+  // 将 Buffer 转为 Base64 字符串（兼容浏览器环境）
+  const base64Excel = btoa(
+    String.fromCharCode.apply(null, new Uint8Array(excelBuffer))
+  )
+
   // 生成 HTML 预览（完整列，前20行，带备注）
   const previewHtml = generateEmailPreviewHtml(mergedData, maxUnits)
 
@@ -399,7 +404,7 @@ export function generateEmlContent(mergedData, maxUnits, emailOptions) {
     attachments: [
       {
         filename: 'material_data.xlsx',
-        data: excelBuffer,
+        data: base64Excel,
         contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
       }
     ]
