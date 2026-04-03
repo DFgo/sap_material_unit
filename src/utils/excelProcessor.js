@@ -387,10 +387,15 @@ export function generateEmlContent(mergedData, maxUnits, emailOptions) {
   // 生成附件 Excel Buffer（双层表头）
   const excelBuffer = generateAttachmentExcelBuffer(mergedData, maxUnits)
 
-  // 将 Buffer 转为 Base64 字符串（兼容浏览器环境）
-  const base64Excel = btoa(
-    String.fromCharCode.apply(null, new Uint8Array(excelBuffer))
-  )
+  // 将 Buffer 转为 Base64 字符串（分块处理避免栈溢出）
+  const uint8Array = new Uint8Array(excelBuffer)
+  const chunkSize = 8192
+  let base64Excel = ''
+  for (let i = 0; i < uint8Array.length; i += chunkSize) {
+    const chunk = uint8Array.slice(i, i + chunkSize)
+    base64Excel += String.fromCharCode.apply(null, chunk)
+  }
+  base64Excel = btoa(base64Excel)
 
   // 生成 HTML 预览（完整列，前20行，带备注）
   const previewHtml = generateEmailPreviewHtml(mergedData, maxUnits)
