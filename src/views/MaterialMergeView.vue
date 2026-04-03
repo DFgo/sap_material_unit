@@ -232,13 +232,13 @@ function startCalculate() {
 }
 
 // 导出 Excel
-function handleExportExcel() {
+async function handleExportExcel() {
   if (mergedData.value.length === 0) {
     ElMessage.warning('没有数据可导出')
     return
   }
   try {
-    exportToExcel(mergedData.value, maxUnits.value, 'merged_output.xlsx')
+    await exportToExcel(mergedData.value, maxUnits.value, 'merged_output.xlsx')
     ElMessage.success('Excel 导出成功')
   } catch (err) {
     ElMessage.error('导出失败')
@@ -255,14 +255,14 @@ function handleExportEmail() {
   emailDialogVisible.value = true
 }
 
-function confirmExportEmail() {
+async function confirmExportEmail() {
   if (!emailForm.value.to) {
     ElMessage.warning('请输入收件人邮箱')
     return
   }
 
   try {
-    const emlContent = generateEmlContent(
+    const emlContent = await generateEmlContent(
       mergedData.value,
       maxUnits.value,
       {

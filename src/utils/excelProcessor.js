@@ -1,18 +1,17 @@
-import * as XLSX from 'xlsx'
-import { eml } from 'eml-generator'
+import ExcelJS from 'exceljs'
 
 /**
  * 全局表格列定义 - 统一所有表格的列顺序和标签
- * 顺序：物料 → 物料描述 → 基本计量单位 → 单位转换1~N（分母/基本计量单位/可选单位/=/计数器）
+ * 顺序：物料 → 物料描述 → 基本计量单位 → 单位转换1~N（分母/可选单位/=/计数器/基本计量单位）
  */
 const BASE_COLUMNS = [
   { prop: '物料', label: '物料' },
   { prop: '物料描述', label: '物料描述' },
-  { prop: '基本计量单位', label: '基本计量单位' }
+  { prop: '基本计量单位', label: '基本计量单位' },
 ]
 
 /**
- * 生成指定单位数量的完整列定义
+ * 生成指定单位数量的完整列定义（单层表头用）
  * @param {number} maxUnits - 最大单位数
  * @returns {Array<{prop: string, label: string}>} 完整列数组
  */
@@ -21,10 +20,10 @@ export function getTableColumns(maxUnits) {
   for (let i = 1; i <= maxUnits; i++) {
     columns.push(
       { prop: `分母${i}`, label: `分母${i}` },
-      { prop: `基本计量单位${i}`, label: `基本计量单位${i}` },
+      { prop: `可选单位${i}`, label: `可选单位${i}` },
       { prop: `等于${i}`, label: `=` },
       { prop: `计数器${i}`, label: `计数器${i}` },
-      { prop: `可选单位${i}`, label: `可选单位${i}` },
+      { prop: `基本计量单位${i}`, label: `基本计量单位${i}` },
     )
   }
   return columns
@@ -36,7 +35,7 @@ export function getTableColumns(maxUnits) {
  * @returns {string[]} prop 数组
  */
 export function getColumnProps(maxUnits) {
-  return getTableColumns(maxUnits).map(col => col.prop)
+  return getTableColumns(maxUnits).map((col) => col.prop)
 }
 
 /**
@@ -44,7 +43,7 @@ export function getColumnProps(maxUnits) {
  * @param {number} maxUnits - 最大单位数
  * @returns {string[]} 表头行1
  */
-function getHeaderRow1(maxUnits) {
+export function getHeaderRow1(maxUnits) {
   const row1 = ['物料', '物料描述', '基本计量单位']
   for (let i = 1; i <= maxUnits; i++) {
     row1.push(`单位转换${i}`, '', '', '', '')
@@ -53,14 +52,14 @@ function getHeaderRow1(maxUnits) {
 }
 
 /**
- * 生成双层表头的行2（具体列名）
+ * 生成双层表头的行2（具体列名，与 getTableColumns 顺序一致）
  * @param {number} maxUnits - 最大单位数
  * @returns {string[]} 表头行2
  */
-function getHeaderRow2(maxUnits) {
+export function getHeaderRow2(maxUnits) {
   const row2 = ['物料', '物料描述', '基本计量单位']
   for (let i = 1; i <= maxUnits; i++) {
-    row2.push(`分母${i}`, `基本计量单位${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`)
+    row2.push(`分母${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`, `基本计量单位${i}`)
   }
   return row2
 }
@@ -74,21 +73,33 @@ function getHeaderRow2(maxUnits) {
 export async function readExcelFileWithProgress(file, onProgress) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
         const data = new Uint8Array(e.target.result)
-        const workbook = XLSX.read(data, { type: 'array', cellDates: true })
-        const sheetName = workbook.SheetNames[0]
-        const sheet = workbook.Sheets[sheetName]
 
-        // 转换为数组格式（保留所有单元格，包括空单元格）
-        const jsonData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
+        // ExcelJS 异步加载
+        const workbook = new ExcelJS.Workbook()
+        await workbook.xlsx.load(data)
+
+        const worksheet = workbook.getWorksheet(1)
+        const sheetName = worksheet.name
+
+        // 将 worksheet 每行转换为数组（保留空单元格）
+        const jsonData = []
+        worksheet.eachRow((row) => {
+          const values = []
+          for (let i = 1; i <= worksheet.columnCount; i++) {
+            const cellValue = row.getCell(i).value
+            values.push(cellValue === undefined ? '' : cellValue)
+          }
+          jsonData.push(values)
+        })
 
         const headers = jsonData[0] || []
         const rows = jsonData.slice(1)
 
         // 过滤掉空行
-        const nonEmptyRows = rows.filter(row => row.some(cell => cell !== ''))
+        const nonEmptyRows = rows.filter((row) => row.some((cell) => cell !== ''))
         const totalRows = nonEmptyRows.length
 
         // 进度回调（分批处理，避免阻塞）
@@ -96,31 +107,20 @@ export async function readExcelFileWithProgress(file, onProgress) {
         const batchSize = 50
         const filteredRows = []
 
-        function processBatch() {
-          return new Promise((resolve) => {
-            const end = Math.min(processed + batchSize, totalRows)
-            for (let i = processed; i < end; i++) {
-              filteredRows.push(nonEmptyRows[i])
-              const preview = nonEmptyRows[i].slice(0, 5).join(' | ')
-              onProgress(i + 1, totalRows, preview)
-            }
-            processed = end
-            resolve()
-          })
-        }
-
-        async function processAll() {
-          while (processed < totalRows) {
-            await processBatch()
-            // 让UI有机会更新
-            await new Promise(r => setTimeout(r, 0))
+        while (processed < totalRows) {
+          const end = Math.min(processed + batchSize, totalRows)
+          for (let i = processed; i < end; i++) {
+            filteredRows.push(nonEmptyRows[i])
+            const preview = nonEmptyRows[i].slice(0, 5).join(' | ')
+            onProgress(i + 1, totalRows, preview)
           }
-
-          onProgress(totalRows, totalRows, '处理完成')
-          resolve({ headers, data: filteredRows, sheetName })
+          processed = end
+          // 让UI有机会更新
+          await new Promise((r) => setTimeout(r, 0))
         }
 
-        processAll().catch(reject)
+        onProgress(totalRows, totalRows, '处理完成')
+        resolve({ headers, data: filteredRows, sheetName })
       } catch (err) {
         reject(err)
       }
@@ -136,17 +136,28 @@ export async function readExcelFileWithProgress(file, onProgress) {
 export async function readExcelFile(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
         const data = new Uint8Array(e.target.result)
-        const workbook = XLSX.read(data, { type: 'array', cellDates: true })
-        const sheetName = workbook.SheetNames[0]
-        const sheet = workbook.Sheets[sheetName]
 
-        const jsonData = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
+        const workbook = new ExcelJS.Workbook()
+        await workbook.xlsx.load(data)
+
+        const worksheet = workbook.getWorksheet(1)
+        const sheetName = worksheet.name
+
+        const jsonData = []
+        worksheet.eachRow((row) => {
+          const values = []
+          for (let i = 1; i <= worksheet.columnCount; i++) {
+            const cellValue = row.getCell(i).value
+            values.push(cellValue === undefined ? '' : cellValue)
+          }
+          jsonData.push(values)
+        })
 
         const headers = jsonData[0] || []
-        const rows = jsonData.slice(1).filter(row => row.some(cell => cell !== ''))
+        const rows = jsonData.slice(1).filter((row) => row.some((cell) => cell !== ''))
 
         resolve({ headers, data: rows, sheetName })
       } catch (err) {
@@ -164,11 +175,13 @@ export async function readExcelFile(file) {
  */
 export function parseMaterialData(rawData) {
   const rows = rawData.data
-  return rows.map(row => ({
-    物料: row[0] || '',
-    物料描述: row[row.length - 1] || '',
-    基本计量单位: row[12] || ''
-  })).filter(row => row.物料 !== '')
+  return rows
+    .map((row) => ({
+      物料: row[0] || '',
+      物料描述: row[row.length - 1] || '',
+      基本计量单位: row[12] || '',
+    }))
+    .filter((row) => row.物料 !== '')
 }
 
 /**
@@ -177,12 +190,14 @@ export function parseMaterialData(rawData) {
  */
 export function parseMaterialUnit(rawData) {
   const rows = rawData.data
-  return rows.map(row => ({
-    物料: row[0] || '',
-    可选计量单位: row[1] || '',
-    计数器: row[2] || '',
-    分母: row[3] || ''
-  })).filter(row => row.物料 !== '')
+  return rows
+    .map((row) => ({
+      物料: row[0] || '',
+      可选计量单位: row[1] || '',
+      计数器: row[2] || '',
+      分母: row[3] || '',
+    }))
+    .filter((row) => row.物料 !== '')
 }
 
 /**
@@ -190,36 +205,36 @@ export function parseMaterialUnit(rawData) {
  */
 export function processMerge(materialData, materialUnit) {
   const unitCounts = {}
-  materialUnit.forEach(row => {
+  materialUnit.forEach((row) => {
     if (!unitCounts[row.物料]) {
       unitCounts[row.物料] = []
     }
     unitCounts[row.物料].push(row)
   })
 
-  const maxUnits = Math.max(...Object.values(unitCounts).map(v => v.length), 0)
+  const maxUnits = Math.max(...Object.values(unitCounts).map((v) => v.length), 0)
 
   const headers = [
     { label: '物料', prop: '物料', span: 1 },
     { label: '物料描述', prop: '物料描述', span: 1 },
-    { label: '基本计量单位', prop: '基本计量单位', span: 1 }
+    { label: '基本计量单位', prop: '基本计量单位', span: 1 },
   ]
 
   for (let i = 1; i <= maxUnits; i++) {
     headers.push(
       { label: `分母${i}`, prop: `分母${i}`, span: 1 },
       { label: `基本计量单位${i}`, prop: `基本计量单位${i}`, span: 1 },
-      { label: `可选单位${i}`, prop: `可选单位${i}`, span: 1 },
       { label: `等于${i}`, prop: `等于${i}`, span: 1 },
-      { label: `计数器${i}`, prop: `计数器${i}`, span: 1 }
+      { label: `计数器${i}`, prop: `计数器${i}`, span: 1 },
+      { label: `可选单位${i}`, prop: `可选单位${i}`, span: 1 },
     )
   }
 
-  const mergedData = materialData.map(row => {
+  const mergedData = materialData.map((row) => {
     const newRow = {
       物料: row.物料,
       物料描述: row.物料描述,
-      基本计量单位: row.基本计量单位
+      基本计量单位: row.基本计量单位,
     }
 
     const units = unitCounts[row.物料] || []
@@ -247,55 +262,167 @@ export function processMerge(materialData, materialUnit) {
 }
 
 /**
- * 导出为 Excel 文件（带合并标题行）
+ * 通用构建 Excel 工作簿（导出 + 邮件附件 共用）
+ * 复用所有样式、合并、格式
  */
-export function exportToExcel(mergedData, maxUnits, filename = 'merged_output.xlsx') {
+async function buildExcelWorkbook(mergedData, maxUnits) {
   const props = getColumnProps(maxUnits)
   const headerRow1 = getHeaderRow1(maxUnits)
   const headerRow2 = getHeaderRow2(maxUnits)
-
-  const dataRows = mergedData.map(row => props.map(prop => row[prop] || ''))
+  const dataRows = mergedData.map((row) => props.map((prop) => row[prop] || ''))
   const allData = [headerRow1, headerRow2, ...dataRows]
-  const ws = XLSX.utils.aoa_to_sheet(allData)
 
-  const merges = []
-  let mergeCol = 3
+  const workbook = new ExcelJS.Workbook()
+  const worksheet = workbook.addWorksheet('物料单位转换数据')
+
+  // 插入所有行
+  allData.forEach(rowData => {
+    worksheet.addRow(rowData)
+  })
+
+  // 前3列垂直合并
+  worksheet.mergeCells('A1:A2')
+  worksheet.mergeCells('B1:B2')
+  worksheet.mergeCells('C1:C2')
+
+  // 单位转换组合并
+  let startCol = 4
   for (let i = 1; i <= maxUnits; i++) {
-    merges.push({ s: { r: 0, c: mergeCol }, e: { r: 0, c: mergeCol + 4 } })
-    mergeCol += 5
+    worksheet.mergeCells(1, startCol, 1, startCol + 4)
+    const cell = worksheet.getCell(1, startCol)
+    cell.alignment = { horizontal: 'center', vertical: 'center', wrapText: true }
+    startCol += 5
   }
-  ws['!merges'] = merges
-  ws['!cols'] = props.map((_, idx) => idx < 3 ? { wch: 15 } : { wch: 12 })
 
-  const wb = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(wb, ws, 'material_data')
-  XLSX.writeFile(wb, filename)
+  // 全局样式：居中 + 边框
+  worksheet.eachRow({ includeEmpty: false }, (row) => {
+    row.eachCell({ includeEmpty: true }, (cell) => {
+      cell.alignment = { horizontal: 'center', vertical: 'center', wrapText: true }
+      cell.border = {
+        top: { style: 'thin' },
+        left: { style: 'thin' },
+        bottom: { style: 'thin' },
+        right: { style: 'thin' },
+      }
+    })
+  })
+
+  // 列宽 + 行高
+  worksheet.getColumn('B').width = 70
+  worksheet.getRow(1).height = 30
+
+  return workbook
 }
 
 /**
- * 生成预览表格 HTML
+ * 导出为 Excel 文件（带合并标题行）
+ */
+export async function exportToExcel(mergedData, maxUnits, filename = 'merged_output.xlsx') {
+  // const props = getColumnProps(maxUnits)
+  // const headerRow1 = getHeaderRow1(maxUnits)
+  // const headerRow2 = getHeaderRow2(maxUnits)
+  // const dataRows = mergedData.map((row) => props.map((prop) => row[prop] || ''))
+  // const allData = [headerRow1, headerRow2, ...dataRows]
+
+  // // 创建工作簿和工作表
+  // const workbook = new ExcelJS.Workbook()
+  // const worksheet = workbook.addWorksheet('物料单位转换数据')
+
+  // // 先加所有行
+  // allData.forEach((rowData) => {
+  //   worksheet.addRow(rowData)
+  // })
+
+  // // 合并前3列的两行表头（物料/物料描述/基本计量单位）
+  // worksheet.mergeCells('A1:A2')
+  // worksheet.mergeCells('B1:B2')
+  // worksheet.mergeCells('C1:C2')
+
+  // // 单位转换组合并
+  // let startCol = 4 // D列开始
+  // for (let i = 1; i <= maxUnits; i++) {
+  //   // 直接拼接单元格：第1行，startCol ~ startCol+4
+  //   worksheet.mergeCells(1, startCol, 1, startCol + 4)
+
+  //   const cell = worksheet.getCell(1, startCol)
+  //   cell.alignment = {
+  //     horizontal: 'center',
+  //     vertical: 'center',
+  //     wrapText: true,
+  //   }
+
+  //   startCol += 5
+  // }
+
+  // // 全局样式：居中 + 全边框
+  // worksheet.eachRow({ includeEmpty: false }, (row) => {
+  //   row.eachCell({ includeEmpty: true }, (cell) => {
+  //     cell.alignment = { horizontal: 'center', vertical: 'center', wrapText: true }
+  //     cell.border = {
+  //       top: { style: 'thin' },
+  //       left: { style: 'thin' },
+  //       bottom: { style: 'thin' },
+  //       right: { style: 'thin' },
+  //     }
+  //   })
+  // })
+
+  // // 物料描述-B列设置宽度
+  // worksheet.getColumn('B').width = 70
+
+  // // 第一列设置高度
+  // worksheet.getRow(1).height = 30
+
+  // // 调用下载工具函数
+  // await downloadExcelFile(workbook, filename)
+  const workbook = await buildExcelWorkbook(mergedData, maxUnits)
+  await downloadExcelFile(workbook, filename)
+}
+
+function getFileName(filename) {
+  const timestamp = new Date()
+    .toISOString()
+    .replace(/[-:\.T]/g, '')
+    .substring(0, 14)
+  const randomStr = Math.random().toString(36).substring(2, 6).toUpperCase()
+  const nameParts = filename.split('.')
+  const ext = nameParts.pop()
+  const finalName = `${nameParts.join('.')}_${timestamp}_${randomStr}.${ext}`
+  return finalName
+}
+
+async function downloadExcelFile(workbook, filename) {
+  const buffer = await workbook.xlsx.writeBuffer()
+  const blob = new Blob([buffer], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = getFileName(filename)
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+/**
+ * 生成预览表格 HTML（复用 getTableColumns 统一列顺序）
  */
 export function generatePreviewTable(data, maxUnits) {
   if (!data || data.length === 0) return ''
 
-  const props = ['物料', '物料描述', '基本计量单位']
-  for (let i = 1; i <= maxUnits; i++) {
-    props.push(`分母${i}`, `基本计量单位${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`)
-  }
-
-  const headers = ['物料', '物料描述', '基本计量单位']
+  const columns = getTableColumns(maxUnits)
 
   let html = '<table style="border-collapse:collapse;width:100%;font-size:12px;">'
   html += '<tr>'
-  headers.forEach(h => {
-    html += `<th style="border:1px solid #ddd;padding:6px;background:#f5f5f5;">${h}</th>`
+  columns.forEach((col) => {
+    html += `<th style="border:1px solid #ddd;padding:6px;background:#f5f5f5;">${col.label}</th>`
   })
   html += '</tr>'
 
-  data.slice(0, 20).forEach(row => {
+  data.slice(0, 20).forEach((row) => {
     html += '<tr>'
-    headers.forEach(prop => {
-      html += `<td style="border:1px solid #ddd;padding:6px;">${row[prop] || ''}</td>`
+    columns.forEach((col) => {
+      html += `<td style="border:1px solid #ddd;padding:6px;">${row[col.prop] || ''}</td>`
     })
     html += '</tr>'
   })
@@ -305,33 +432,56 @@ export function generatePreviewTable(data, maxUnits) {
 }
 
 /**
- * 生成邮件附件 Excel Buffer（双层表头，与 exportToExcel 格式一致）
+ * 生成邮件附件 Excel Base64 字符串（双层表头，与 exportToExcel 格式一致）
  * @param {Array} mergedData - 合并后数据
  * @param {number} maxUnits - 最大单位数
- * @returns {Buffer} Excel 文件 Buffer
+ * @returns {Promise<string>} Excel 文件 Base64 字符串
  */
-export function generateAttachmentExcelBuffer(mergedData, maxUnits) {
-  const props = getColumnProps(maxUnits)
-  const headerRow1 = getHeaderRow1(maxUnits)
-  const headerRow2 = getHeaderRow2(maxUnits)
+export async function generateAttachmentExcelBuffer(mergedData, maxUnits) {
+  // const props = getColumnProps(maxUnits)
+  // const headerRow1 = getHeaderRow1(maxUnits)
+  // const headerRow2 = getHeaderRow2(maxUnits)
+  // const dataRows = mergedData.map((row) => props.map((prop) => row[prop] || ''))
+  // const allData = [headerRow1, headerRow2, ...dataRows]
 
-  const dataRows = mergedData.map(row => props.map(prop => row[prop] || ''))
-  const allData = [headerRow1, headerRow2, ...dataRows]
-  const ws = XLSX.utils.aoa_to_sheet(allData)
+  // const workbook = new ExcelJS.Workbook()
+  // const worksheet = workbook.addWorksheet('material_data')
 
-  const merges = []
-  let mergeCol = 3
-  for (let i = 1; i <= maxUnits; i++) {
-    merges.push({ s: { r: 0, c: mergeCol }, e: { r: 0, c: mergeCol + 4 } })
-    mergeCol += 5
-  }
-  ws['!merges'] = merges
-  ws['!cols'] = props.map((_, idx) => idx < 3 ? { wch: 15 } : { wch: 12 })
+  // // 先加所有行，不再循环里做合并
+  // allData.forEach((rowData) => {
+  //   worksheet.addRow(rowData)
+  // })
 
-  const wb = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(wb, ws, 'material_data')
+  // // 统一合并（移出循环）
+  // let mergeCol = 3
+  // for (let i = 1; i <= maxUnits; i++) {
+  //   worksheet.mergeCells(1, mergeCol + 1, 1, mergeCol + 5)
+  //   const cell = worksheet.getCell(1, mergeCol + 1)
+  //   cell.alignment = { horizontal: 'center', vertical: 'center', wrapText: true }
+  //   mergeCol += 5
+  // }
 
-  return XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' })
+  // props.forEach((_, idx) => {
+  //   worksheet.getColumn(idx + 1).width = idx < 3 ? 15 : 12
+  // })
+
+  // const excelBuffer = await workbook.xlsx.writeBuffer()
+
+  // // 换成正确的 base64
+  // return bufferToBase64(excelBuffer)
+  const workbook = await buildExcelWorkbook(mergedData, maxUnits)
+  const buffer = await workbook.xlsx.writeBuffer()
+  return bufferToBase64(buffer)
+}
+
+
+function bufferToBase64(buffer) {
+  return new Promise((resolve) => {
+    const blob = new Blob([buffer], { type: 'application/octet-stream' })
+    const reader = new FileReader()
+    reader.onloadend = () => resolve(reader.result.split(',')[1])
+    reader.readAsDataURL(blob)
+  })
 }
 
 /**
@@ -345,13 +495,14 @@ export function generateEmailPreviewHtml(data, maxUnits) {
 
   const columns = getTableColumns(maxUnits)
   const headerRow1 = getHeaderRow1(maxUnits)
+  const headerRow2 = getHeaderRow2(maxUnits)
 
   let html = `<html><body>`
   html += `<h3>SAP物料单位数据汇总</h3>`
   html += `<p>共 ${data.length} 条记录</p>`
   html += `<table style="border-collapse:collapse;width:100%;font-size:12px;">`
 
-  // 渲染表头
+  // 渲染表头第1行（分组大标题）
   html += `<tr>`
   headerRow1.forEach((h) => {
     const style = h === '' ? 'visibility:hidden;' : ''
@@ -359,11 +510,19 @@ export function generateEmailPreviewHtml(data, maxUnits) {
   })
   html += `</tr>`
 
+  // 渲染表头第2行（具体列名）
+  html += `<tr>`
+  headerRow2.forEach((h) => {
+    const style = h === '' ? 'visibility:hidden;' : ''
+    html += `<th style="border:1px solid #ddd;padding:6px;background:#f5f5f5;${style}">${h}</th>`
+  })
+  html += `</tr>`
+
   // 渲染数据行（只取前20条）
   const previewData = data.slice(0, 20)
-  previewData.forEach(row => {
+  previewData.forEach((row) => {
     html += `<tr>`
-    columns.forEach(col => {
+    columns.forEach((col) => {
       html += `<td style="border:1px solid #ddd;padding:6px;">${row[col.prop] || ''}</td>`
     })
     html += `</tr>`
@@ -377,43 +536,50 @@ export function generateEmailPreviewHtml(data, maxUnits) {
 }
 
 /**
- * 生成 EML 格式字符串（使用 eml-generator）
+ * 生成 EML 格式字符串（自定义 MIME 拼接）
  * @param {Array} mergedData - 合并后数据
  * @param {number} maxUnits - 最大单位数
  * @param {Object} emailOptions - 邮件选项 { to, from, subject }
- * @returns {string} EML 格式字符串
+ * @returns {Promise<string>} EML 格式字符串
  */
-export function generateEmlContent(mergedData, maxUnits, emailOptions) {
-  // 生成附件 Excel Buffer（双层表头）
-  const excelBuffer = generateAttachmentExcelBuffer(mergedData, maxUnits)
-
-  // 将 Buffer 转为 Base64 字符串（分块处理避免栈溢出）
-  const uint8Array = new Uint8Array(excelBuffer)
-  const chunkSize = 8192
-  let base64Excel = ''
-  for (let i = 0; i < uint8Array.length; i += chunkSize) {
-    const chunk = uint8Array.slice(i, i + chunkSize)
-    base64Excel += String.fromCharCode.apply(null, chunk)
+export async function generateEmlContent(mergedData, maxUnits, emailOptions) {
+  const config = {
+    from: 'sap-system@company.com',
+    subject: 'SAP物料单位数据',
+    ...emailOptions,
   }
-  base64Excel = btoa(base64Excel)
 
-  // 生成 HTML 预览（完整列，前20行，带备注）
-  const previewHtml = generateEmailPreviewHtml(mergedData, maxUnits)
+  const [excelBase64, previewHtml] = await Promise.all([
+    generateAttachmentExcelBuffer(mergedData, maxUnits),
+    generateEmailPreviewHtml(mergedData, maxUnits),
+  ])
 
-  const emailContent = eml({
-    from: emailOptions.from || 'sap-system@company.com',
-    to: emailOptions.to,
-    subject: emailOptions.subject || 'SAP物料单位数据',
-    text: `SAP物料单位数据汇总（共 ${mergedData.length} 条记录）`,
-    html: previewHtml,
-    attachments: [
-      {
-        filename: 'material_data.xlsx',
-        data: base64Excel,
-        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-      }
-    ]
-  })
+  const boundary = `----=_Part_${Math.random().toString(36).slice(2)}`
+  const date = new Date().toUTCString()
+  const base64Formatted = excelBase64.replace(/.{76}/g, '$&\n')
 
-  return emailContent
+  const emlLines = [
+    'MIME-Version: 1.0',
+    `From: ${config.from}`,
+    `To: ${config.to}`,
+    `Subject: ${config.subject}`,
+    `Date: ${date}`,
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/html; charset=utf-8',
+    '',
+    previewHtml,
+    '',
+    `--${boundary}`,
+    'Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet; name="material_data.xlsx"',
+    'Content-Transfer-Encoding: base64',
+    'Content-Disposition: attachment; filename="material_data.xlsx"',
+    '',
+    base64Formatted,
+    '',
+    `--${boundary}--`,
+  ]
+
+  return emlLines.join('\n')
 }
