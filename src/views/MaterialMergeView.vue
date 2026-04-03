@@ -301,7 +301,7 @@ function addRow() {
   const newRow = { 物料: '', 物料描述: '', 基本计量单位: '' }
   for (let i = 1; i <= maxUnits.value; i++) {
     newRow[`分母${i}`] = ''
-    newRow[`基本计量单位${i}`] = ''
+    newRow[`基本计量单位${i}`] = newRow.基本计量单位
     newRow[`可选单位${i}`] = ''
     newRow[`等于${i}`] = ''
     newRow[`计数器${i}`] = ''
