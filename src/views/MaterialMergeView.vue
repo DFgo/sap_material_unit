@@ -7,8 +7,9 @@ import {
   parseMaterialUnit,
   processMerge,
   exportToExcel,
-  generatePreviewTable,
-  generateAttachmentBase64
+  generateEmlContent,
+  generateEmailPreviewHtml,
+  getTableColumns
 } from '../utils/excelProcessor'
 
 // 状态
@@ -48,7 +49,7 @@ const emailForm = ref({
   to: '',
   subject: 'SAP物料单位数据'
 })
-const emailPreviewData = computed(() => mergedData.value.slice(0, 20))
+const emailPreviewHtml = computed(() => generateEmailPreviewHtml(mergedData.value.slice(0, 20), maxUnits.value))
 
 // 过滤后的数据
 const filteredData = computed(() => {
@@ -67,24 +68,18 @@ const paginatedData = computed(() => {
   return filteredData.value.slice(start, end)
 })
 
-// 表格列
+// 表格列（minWidth 仅用于页面展示，全局列顺序由 getTableColumns 统一控制）
 const tableColumns = computed(() => {
-  const cols = [
-    { prop: '物料', label: '物料', minWidth: 100 },
-    { prop: '物料描述', label: '物料描述', minWidth: 150 },
-    { prop: '基本计量单位', label: '基本计量单位', minWidth: 90 }
-  ]
-
-  for (let i = 1; i <= maxUnits.value; i++) {
-    cols.push(
-      { prop: `分母${i}`, label: `分母${i}`, minWidth: 70 },
-      { prop: `基本计量单位${i}`, label: `基本单位${i}`, minWidth: 80 },
-      { prop: `可选单位${i}`, label: `可选单位${i}`, minWidth: 80 },
-      { prop: `等于${i}`, label: `=`, minWidth: 50 },
-      { prop: `计数器${i}`, label: `计数器${i}`, minWidth: 70 }
-    )
+  const minWidthMap = {
+    '物料': 100,
+    '物料描述': 150,
+    '基本计量单位': 90,
+    '=': 50
   }
-  return cols
+  return getTableColumns(maxUnits.value).map(col => ({
+    ...col,
+    minWidth: minWidthMap[col.label] || 80
+  }))
 })
 
 // 源数据列（原始数据 - 根据第一行数据动态计算）
@@ -147,7 +142,7 @@ async function handleMaterialDataUpload(file) {
 
     rawMaterialData.value = result.data.map((row, idx) => {
       const obj = { _index: idx }
-      result.headers.forEach((h, i) => {
+      result.headers.forEach((_, i) => {
         obj[`col${i}`] = row[i]
       })
       return obj
@@ -186,7 +181,7 @@ async function handleMaterialUnitUpload(file) {
 
     rawMaterialUnit.value = result.data.map((row, idx) => {
       const obj = { _index: idx }
-      result.headers.forEach((h, i) => {
+      result.headers.forEach((_, i) => {
         obj[`col${i}`] = row[i]
       })
       return obj
@@ -267,37 +262,15 @@ function confirmExportEmail() {
   }
 
   try {
-    const previewHtml = generatePreviewTable(emailDataForPreview.value, maxUnits.value)
-    const attachmentBase64 = generateAttachmentBase64(mergedData.value, maxUnits.value)
-
-    // 手动构造 EML 文件（RFC 822 格式）
-    const from = 'sap-system@company.com'
-    const to = emailForm.value.to
-    const subject = emailForm.value.subject || 'SAP物料单位数据'
-    const date = new Date().toUTCString()
-
-    // 构造邮件内容
-    const boundary = '----=_Part_12345'
-
-    let emlContent = `From: ${from}\n`
-    emlContent += `To: ${to}\n`
-    emlContent += `Subject: ${subject}\n`
-    emlContent += `Date: ${date}\n`
-    emlContent += `MIME-Version: 1.0\n`
-    emlContent += `Content-Type: multipart/mixed; boundary="${boundary}"\n\n`
-
-    // 正文部分
-    emlContent += `--${boundary}\n`
-    emlContent += `Content-Type: text/html; charset=utf-8\n\n`
-    emlContent += `<html><body><h3>SAP物料单位数据汇总</h3><p>共 ${mergedData.value.length} 条记录</p>${previewHtml}</body></html>\n\n`
-
-    // 附件部分
-    emlContent += `--${boundary}\n`
-    emlContent += `Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet; name="material_data.xlsx"\n`
-    emlContent += `Content-Transfer-Encoding: base64\n`
-    emlContent += `Content-Disposition: attachment; filename="material_data.xlsx"\n\n`
-    emlContent += attachmentBase64 + '\n\n'
-    emlContent += `--${boundary}--\n`
+    const emlContent = generateEmlContent(
+      mergedData.value,
+      maxUnits.value,
+      {
+        to: emailForm.value.to,
+        subject: emailForm.value.subject || 'SAP物料单位数据',
+        from: 'sap-system@company.com'
+      }
+    )
 
     // 下载 EML 文件
     const blob = new Blob([emlContent], { type: 'message/rfc822' })
@@ -315,8 +288,6 @@ function confirmExportEmail() {
     ElMessage.error('生成邮件失败')
   }
 }
-
-const emailDataForPreview = computed(() => mergedData.value.slice(0, 20))
 
 // 删除行
 function deleteRow(index) {
@@ -556,24 +527,7 @@ function handlePageChange(page) {
       </el-form>
       <div class="email-preview">
         <h4>邮件预览（前20条）</h4>
-        <div class="preview-table-wrapper">
-          <table class="preview-table">
-            <thead>
-              <tr>
-                <th>物料</th>
-                <th>物料描述</th>
-                <th>基本计量单位</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(row, idx) in emailPreviewData" :key="idx">
-                <td>{{ row.物料 }}</td>
-                <td>{{ row.物料描述 }}</td>
-                <td>{{ row.基本计量单位 }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+        <div class="preview-html-wrapper" v-html="emailPreviewHtml"></div>
         <p class="preview-footer">附件将包含全部 {{ mergedData.length }} 条数据</p>
       </div>
       <template #footer>
@@ -753,31 +707,13 @@ function handlePageChange(page) {
   font-size: 14px;
 }
 
-.preview-table-wrapper {
-  max-height: 200px;
+.preview-html-wrapper {
+  max-height: 300px;
   overflow: auto;
   border: 1px solid #ddd;
   border-radius: 4px;
-}
-
-.preview-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-}
-
-.preview-table th,
-.preview-table td {
-  padding: 6px 8px;
-  text-align: left;
-  border-bottom: 1px solid #eee;
-}
-
-.preview-table th {
-  background: #f5f5f5;
-  font-weight: bold;
-  position: sticky;
-  top: 0;
+  padding: 10px;
+  background: #fafafa;
 }
 
 .preview-footer {

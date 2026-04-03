@@ -1,4 +1,69 @@
 import * as XLSX from 'xlsx'
+import { eml } from 'eml-generator'
+
+/**
+ * 全局表格列定义 - 统一所有表格的列顺序和标签
+ * 顺序：物料 → 物料描述 → 基本计量单位 → 单位转换1~N（分母/基本计量单位/可选单位/=/计数器）
+ */
+const BASE_COLUMNS = [
+  { prop: '物料', label: '物料' },
+  { prop: '物料描述', label: '物料描述' },
+  { prop: '基本计量单位', label: '基本计量单位' }
+]
+
+/**
+ * 生成指定单位数量的完整列定义
+ * @param {number} maxUnits - 最大单位数
+ * @returns {Array<{prop: string, label: string}>} 完整列数组
+ */
+export function getTableColumns(maxUnits) {
+  const columns = [...BASE_COLUMNS]
+  for (let i = 1; i <= maxUnits; i++) {
+    columns.push(
+      { prop: `分母${i}`, label: `分母${i}` },
+      { prop: `基本计量单位${i}`, label: `基本计量单位${i}` },
+      { prop: `可选单位${i}`, label: `可选单位${i}` },
+      { prop: `等于${i}`, label: `=` },
+      { prop: `计数器${i}`, label: `计数器${i}` }
+    )
+  }
+  return columns
+}
+
+/**
+ * 获取列的 prop 数组（按全局定义顺序）
+ * @param {number} maxUnits - 最大单位数
+ * @returns {string[]} prop 数组
+ */
+export function getColumnProps(maxUnits) {
+  return getTableColumns(maxUnits).map(col => col.prop)
+}
+
+/**
+ * 生成双层表头的行1（分组大标题）
+ * @param {number} maxUnits - 最大单位数
+ * @returns {string[]} 表头行1
+ */
+function getHeaderRow1(maxUnits) {
+  const row1 = ['物料', '物料描述', '基本计量单位']
+  for (let i = 1; i <= maxUnits; i++) {
+    row1.push(`单位转换${i}`, '', '', '', '')
+  }
+  return row1
+}
+
+/**
+ * 生成双层表头的行2（具体列名）
+ * @param {number} maxUnits - 最大单位数
+ * @returns {string[]} 表头行2
+ */
+function getHeaderRow2(maxUnits) {
+  const row2 = ['物料', '物料描述', '基本计量单位']
+  for (let i = 1; i <= maxUnits; i++) {
+    row2.push(`分母${i}`, `基本计量单位${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`)
+  }
+  return row2
+}
 
 /**
  * 读取 Excel 文件（带进度回调）
@@ -185,37 +250,20 @@ export function processMerge(materialData, materialUnit) {
  * 导出为 Excel 文件（带合并标题行）
  */
 export function exportToExcel(mergedData, maxUnits, filename = 'merged_output.xlsx') {
-  const props = ['物料', '物料描述', '基本计量单位']
-  for (let i = 1; i <= maxUnits; i++) {
-    props.push(`分母${i}`, `基本计量单位${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`)
-  }
+  const props = getColumnProps(maxUnits)
+  const headerRow1 = getHeaderRow1(maxUnits)
+  const headerRow2 = getHeaderRow2(maxUnits)
 
-  const headerRow1 = ['物料', '物料描述', '基本计量单位']
-  const headerRow2 = ['物料', '物料描述', '基本计量单位']
-
-  for (let i = 1; i <= maxUnits; i++) {
-    headerRow1.push(`单位转换${i}`, '', '', '', '')
-    headerRow2.push(`分母${i}`, `基本计量单位${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`)
-  }
-
-  const dataRows = mergedData.map(row =>
-    props.map(prop => row[prop] || '')
-  )
-
+  const dataRows = mergedData.map(row => props.map(prop => row[prop] || ''))
   const allData = [headerRow1, headerRow2, ...dataRows]
   const ws = XLSX.utils.aoa_to_sheet(allData)
 
   const merges = []
   let mergeCol = 3
-
   for (let i = 1; i <= maxUnits; i++) {
-    merges.push({
-      s: { r: 0, c: mergeCol },
-      e: { r: 0, c: mergeCol + 4 }
-    })
+    merges.push({ s: { r: 0, c: mergeCol }, e: { r: 0, c: mergeCol + 4 } })
     mergeCol += 5
   }
-
   ws['!merges'] = merges
   ws['!cols'] = props.map((_, idx) => idx < 3 ? { wch: 15 } : { wch: 12 })
 
@@ -257,68 +305,105 @@ export function generatePreviewTable(data, maxUnits) {
 }
 
 /**
- * 生成邮件附件内容（Base64）- 保留以兼容旧代码
+ * 生成邮件附件 Excel Buffer（双层表头，与 exportToExcel 格式一致）
+ * @param {Array} mergedData - 合并后数据
+ * @param {number} maxUnits - 最大单位数
+ * @returns {Buffer} Excel 文件 Buffer
  */
-export function generateEmailAttachment(mergedData, maxUnits) {
-  const props = ['物料', '物料描述', '基本计量单位']
-  for (let i = 1; i <= maxUnits; i++) {
-    props.push(`分母${i}`, `基本计量单位${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`)
-  }
+export function generateAttachmentExcelBuffer(mergedData, maxUnits) {
+  const props = getColumnProps(maxUnits)
+  const headerRow1 = getHeaderRow1(maxUnits)
+  const headerRow2 = getHeaderRow2(maxUnits)
 
-  const headerRow = ['物料', '物料描述', '基本计量单位']
-  for (let i = 1; i <= maxUnits; i++) {
-    headerRow.push(`分母${i}`, `基本计量单位${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`)
-  }
-
-  const dataRows = mergedData.map(row =>
-    props.map(prop => row[prop] || '')
-  )
-
-  const allData = [headerRow, ...dataRows]
+  const dataRows = mergedData.map(row => props.map(prop => row[prop] || ''))
+  const allData = [headerRow1, headerRow2, ...dataRows]
   const ws = XLSX.utils.aoa_to_sheet(allData)
-  ws['!cols'] = props.map(() => ({ wch: 12 }))
+
+  const merges = []
+  let mergeCol = 3
+  for (let i = 1; i <= maxUnits; i++) {
+    merges.push({ s: { r: 0, c: mergeCol }, e: { r: 0, c: mergeCol + 4 } })
+    mergeCol += 5
+  }
+  ws['!merges'] = merges
+  ws['!cols'] = props.map((_, idx) => idx < 3 ? { wch: 15 } : { wch: 12 })
 
   const wb = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(wb, ws, 'material_data')
 
-  return XLSX.write(wb, { bookType: 'xlsx', type: 'base64' })
+  return XLSX.write(wb, { bookType: 'xlsx', type: 'buffer' })
 }
 
 /**
- * 获取单位转换组的大标题（用于表格显示）
+ * 生成邮件预览 HTML（完整列，前20行，带预览备注）
+ * @param {Array} data - 数据（通常传前20条）
+ * @param {number} maxUnits - 最大单位数
+ * @returns {string} HTML 字符串
  */
-export function getUnitGroupHeaders(maxUnits) {
-  const groups = []
-  for (let i = 1; i <= maxUnits; i++) {
-    groups.push({
-      label: `单位转换${i}`,
-      cols: [`分母${i}`, `基本计量单位${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`]
+export function generateEmailPreviewHtml(data, maxUnits) {
+  if (!data || data.length === 0) return ''
+
+  const columns = getTableColumns(maxUnits)
+  const headerRow1 = getHeaderRow1(maxUnits)
+
+  let html = `<html><body>`
+  html += `<h3>SAP物料单位数据汇总</h3>`
+  html += `<p>共 ${data.length} 条记录</p>`
+  html += `<table style="border-collapse:collapse;width:100%;font-size:12px;">`
+
+  // 渲染表头
+  html += `<tr>`
+  headerRow1.forEach((h) => {
+    const style = h === '' ? 'visibility:hidden;' : ''
+    html += `<th style="border:1px solid #ddd;padding:6px;background:#f5f5f5;${style}">${h}</th>`
+  })
+  html += `</tr>`
+
+  // 渲染数据行（只取前20条）
+  const previewData = data.slice(0, 20)
+  previewData.forEach(row => {
+    html += `<tr>`
+    columns.forEach(col => {
+      html += `<td style="border:1px solid #ddd;padding:6px;">${row[col.prop] || ''}</td>`
     })
-  }
-  return groups
+    html += `</tr>`
+  })
+
+  html += `</table>`
+  html += `<p style="color:#909399;font-size:12px;margin-top:10px;">（此为数据预览，详见附件）</p>`
+  html += `</body></html>`
+
+  return html
 }
 
 /**
- * 生成邮件附件 Base64 (不含表头，仅数据)
+ * 生成 EML 格式字符串（使用 eml-generator）
+ * @param {Array} mergedData - 合并后数据
+ * @param {number} maxUnits - 最大单位数
+ * @param {Object} emailOptions - 邮件选项 { to, from, subject }
+ * @returns {string} EML 格式字符串
  */
-export function generateAttachmentBase64(data, maxUnits) {
-  const props = ['物料', '物料描述', '基本计量单位']
-  for (let i = 1; i <= maxUnits; i++) {
-    props.push(`分母${i}`, `基本计量单位${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`)
-  }
+export function generateEmlContent(mergedData, maxUnits, emailOptions) {
+  // 生成附件 Excel Buffer（双层表头）
+  const excelBuffer = generateAttachmentExcelBuffer(mergedData, maxUnits)
 
-  const headerRow = ['物料', '物料描述', '基本计量单位']
-  for (let i = 1; i <= maxUnits; i++) {
-    headerRow.push(`分母${i}`, `基本计量单位${i}`, `可选单位${i}`, `等于${i}`, `计数器${i}`)
-  }
+  // 生成 HTML 预览（完整列，前20行，带备注）
+  const previewHtml = generateEmailPreviewHtml(mergedData, maxUnits)
 
-  const dataRows = data.map(row => props.map(prop => row[prop] || ''))
-  const allData = [headerRow, ...dataRows]
-  const ws = XLSX.utils.aoa_to_sheet(allData)
-  ws['!cols'] = props.map(() => ({ wch: 12 }))
+  const emailContent = eml({
+    from: emailOptions.from || 'sap-system@company.com',
+    to: emailOptions.to,
+    subject: emailOptions.subject || 'SAP物料单位数据',
+    text: `SAP物料单位数据汇总（共 ${mergedData.length} 条记录）`,
+    html: previewHtml,
+    attachments: [
+      {
+        filename: 'material_data.xlsx',
+        data: excelBuffer,
+        contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      }
+    ]
+  })
 
-  const wb = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(wb, ws, 'material_data')
-
-  return XLSX.write(wb, { bookType: 'xlsx', type: 'base64' })
+  return emailContent
 }
